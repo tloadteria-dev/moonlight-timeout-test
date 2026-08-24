@@ -53,7 +53,8 @@ jobs:
         shell: pwsh
         run: |
           Set-Location moonlight-qt
-          $path = 'app/backend/nvhttp.cpp'
+          $relativePath = 'app/backend/nvhttp.cpp'
+          $path = Join-Path (Get-Location).Path $relativePath
           $text = [System.IO.File]::ReadAllText($path)
 
           $fastOld = '#define FAST_FAIL_TIMEOUT_MS 2000'
@@ -72,7 +73,7 @@ jobs:
           [System.IO.File]::WriteAllText($path, $text, (New-Object System.Text.UTF8Encoding($false)))
 
           $changed = @(git diff --name-only)
-          if ($changed.Count -ne 1 -or $changed[0].Trim() -ne $path) {
+          if ($changed.Count -ne 1 -or $changed[0].Trim() -ne $relativePath) {
             throw "Unexpected changed files: $($changed -join ', ')"
           }
 
@@ -83,9 +84,9 @@ jobs:
           if ($patched.Contains($requestOld)) { throw 'Old REQUEST timeout still present.' }
 
           git diff --check
-          git diff -- app/backend/nvhttp.cpp | Tee-Object -FilePath ../timeout.patch
+          git diff -- $relativePath | Tee-Object -FilePath ../timeout.patch
 
-          $diff = (git diff --unified=0 -- app/backend/nvhttp.cpp) -join "`n"
+          $diff = (git diff --unified=0 -- $relativePath) -join "`n"
           if ($diff -notmatch [regex]::Escape('-#define FAST_FAIL_TIMEOUT_MS 2000')) { throw 'Expected FAST_FAIL removal not found in diff.' }
           if ($diff -notmatch [regex]::Escape('+#define FAST_FAIL_TIMEOUT_MS 7000')) { throw 'Expected FAST_FAIL addition not found in diff.' }
           if ($diff -notmatch [regex]::Escape('-#define REQUEST_TIMEOUT_MS 5000')) { throw 'Expected REQUEST removal not found in diff.' }
