@@ -1,0 +1,198 @@
+name: Audit custom Moonlight against official v6.1.0
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit-windows-x64:
+    runs-on: windows-2022
+    timeout-minutes: 75
+
+    steps:
+      - name: Checkout audit harness
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Install Qt 6.7.2 (matching official v6.1.0 release)
+        uses: jurplel/install-qt-action@48d3ad6db93f3627c8ee7a0454bc6f3744f7e730
+        with:
+          version: '6.7.2'
+          host: 'windows'
+          target: 'desktop'
+          arch: 'win64_msvc2019_64'
+          cache: true
+
+      - name: Ensure 7-Zip is available
+        shell: pwsh
+        run: |
+          $sevenZip = Join-Path $env:ProgramFiles '7-Zip'
+          if (-not (Test-Path (Join-Path $sevenZip '7z.exe'))) {
+            throw '7-Zip is not present on the GitHub-hosted Windows runner.'
+          }
+          $sevenZip | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Download and verify official Moonlight v6.1.0 portable x64
+        shell: pwsh
+        run: |
+          $url = 'https://github.com/moonlight-stream/moonlight-qt/releases/download/v6.1.0/MoonlightPortable-x64-6.1.0.zip'
+          $expected = '95F4D0853A31C7FCED4B6D233DDF55EE41720963F2E2620A9CB49A21D112AED1'
+          Invoke-WebRequest -Uri $url -OutFile 'official.zip'
+          $actual = (Get-FileHash official.zip -Algorithm SHA256).Hash
+          if ($actual -ne $expected) { throw "Official release hash mismatch: $actual" }
+          Expand-Archive official.zip -DestinationPath official -Force
+          Write-Host "Official ZIP SHA-256 verified: $actual"
+
+      - name: Clone exact official v6.1.0 source commit and submodules
+        shell: pwsh
+        run: |
+          git clone --branch v6.1.0 --depth 1 --recurse-submodules https://github.com/moonlight-stream/moonlight-qt.git moonlight-qt
+          Set-Location moonlight-qt
+          git submodule update --init --recursive
+          $expected = 'f786e94c7b2f943e24e65d7d74deb539b827fc84'
+          $actual = (git rev-parse HEAD).Trim()
+          if ($actual -ne $expected) { throw "Upstream commit mismatch: $actual" }
+          git status --porcelain
+          if (git status --porcelain) { throw 'Official source checkout is not clean.' }
+          Write-Host "Official source commit verified: $actual"
+
+      - name: Apply and independently verify two-line timeout patch only
+        shell: pwsh
+        run: |
+          Set-Location moonlight-qt
+          $relativePath = 'app/backend/nvhttp.cpp'
+          $path = Join-Path (Get-Location).Path $relativePath
+          $text = [System.IO.File]::ReadAllText($path)
+          $oldA = '#define FAST_FAIL_TIMEOUT_MS 2000'
+          $oldB = '#define REQUEST_TIMEOUT_MS 5000'
+          $newA = '#define FAST_FAIL_TIMEOUT_MS 7000'
+          $newB = '#define REQUEST_TIMEOUT_MS 10000'
+          if (($text.Split(@($oldA), [System.StringSplitOptions]::None).Count - 1) -ne 1) { throw 'FAST_FAIL original constant mismatch.' }
+          if (($text.Split(@($oldB), [System.StringSplitOptions]::None).Count - 1) -ne 1) { throw 'REQUEST original constant mismatch.' }
+          $patched = $text.Replace($oldA, $newA).Replace($oldB, $newB)
+          [System.IO.File]::WriteAllText($path, $patched, (New-Object System.Text.UTF8Encoding($false)))
+          $changed = @(git diff --name-only)
+          if ($changed.Count -ne 1 -or $changed[0].Trim() -ne $relativePath) { throw "Unexpected source changes: $($changed -join ', ')" }
+          git diff --check
+          $diff = (git diff --unified=0 -- $relativePath) -join "`n"
+          $removed = @($diff -split "`n" | Where-Object { $_ -match '^-' -and $_ -notmatch '^---' })
+          $added = @($diff -split "`n" | Where-Object { $_ -match '^\+' -and $_ -notmatch '^\+\+\+' })
+          if ($removed.Count -ne 2 -or $added.Count -ne 2) { throw 'Patch is not exactly two removed and two added lines.' }
+          if ($diff -notmatch [regex]::Escape('-#define FAST_FAIL_TIMEOUT_MS 2000')) { throw 'Expected FAST_FAIL removal missing.' }
+          if ($diff -notmatch [regex]::Escape('+#define FAST_FAIL_TIMEOUT_MS 7000')) { throw 'Expected FAST_FAIL addition missing.' }
+          if ($diff -notmatch [regex]::Escape('-#define REQUEST_TIMEOUT_MS 5000')) { throw 'Expected REQUEST removal missing.' }
+          if ($diff -notmatch [regex]::Escape('+#define REQUEST_TIMEOUT_MS 10000')) { throw 'Expected REQUEST addition missing.' }
+          git diff -- $relativePath | Set-Content ../timeout.patch -Encoding utf8
+          Write-Host 'Source comparison PASS: exactly two timeout constants changed.'
+
+      - name: Verify compiler and Qt versions
+        shell: cmd
+        run: |
+          qmake -v
+          moonlight-qt\scripts\vswhere.exe -latest -property installationPath
+
+      - name: Build patched Moonlight with upstream release script
+        shell: cmd
+        working-directory: moonlight-qt
+        run: scripts\build-arch.bat release
+
+      - name: Build audited package from official files plus patched Moonlight.exe only
+        shell: pwsh
+        run: |
+          $builtZip = Get-ChildItem 'moonlight-qt/build/installer-x64-release/MoonlightPortable-x64-6.1.0.zip' | Select-Object -First 1
+          if (-not $builtZip) { throw 'Patched portable build was not produced.' }
+          Expand-Archive $builtZip.FullName -DestinationPath rebuilt -Force
+
+          Copy-Item official audited -Recurse
+          Copy-Item rebuilt\Moonlight.exe audited\Moonlight.exe -Force
+
+          $officialFiles = @(Get-ChildItem official -Recurse -File | ForEach-Object { $_.FullName.Substring((Resolve-Path official).Path.Length + 1) } | Sort-Object)
+          $auditedFiles  = @(Get-ChildItem audited  -Recurse -File | ForEach-Object { $_.FullName.Substring((Resolve-Path audited).Path.Length + 1) } | Sort-Object)
+          if (Compare-Object $officialFiles $auditedFiles) { throw 'Audited package file list differs from official package.' }
+
+          $officialDirs = @(Get-ChildItem official -Recurse -Directory)
+          $auditedDirs = @(Get-ChildItem audited -Recurse -Directory)
+          if ($officialFiles.Count -ne 253) { throw "Unexpected official file count: $($officialFiles.Count)" }
+          if ($officialDirs.Count -ne 34) { throw "Unexpected official folder count: $($officialDirs.Count)" }
+          if ($auditedFiles.Count -ne 253 -or $auditedDirs.Count -ne 34) { throw 'Audited package structure count mismatch.' }
+
+          $diffFiles = @()
+          foreach ($rel in $officialFiles) {
+            $a = (Get-FileHash (Join-Path official $rel) -Algorithm SHA256).Hash
+            $b = (Get-FileHash (Join-Path audited $rel) -Algorithm SHA256).Hash
+            if ($a -ne $b) { $diffFiles += $rel }
+          }
+          if ($diffFiles.Count -ne 1 -or $diffFiles[0] -ne 'Moonlight.exe') {
+            throw "Expected Moonlight.exe to be the only differing packaged file. Differences: $($diffFiles -join ', ')"
+          }
+
+          $officialSig = Get-AuthenticodeSignature official\Moonlight.exe
+          $customSig = Get-AuthenticodeSignature audited\Moonlight.exe
+          $officialVersion = (Get-Item official\Moonlight.exe).VersionInfo.FileVersion
+          $customVersion = (Get-Item audited\Moonlight.exe).VersionInfo.FileVersion
+          if ($customVersion -notmatch '^6\.1\.0') { throw "Unexpected patched executable version: $customVersion" }
+
+          $proc = Start-Process -FilePath (Resolve-Path audited\Moonlight.exe) -WorkingDirectory (Resolve-Path audited) -PassThru
+          Start-Sleep -Seconds 8
+          $alive = -not $proc.HasExited
+          if (-not $alive -and $proc.ExitCode -ne 0) { throw "Moonlight exited during smoke test with code $($proc.ExitCode)" }
+          if ($alive) { Stop-Process -Id $proc.Id -Force }
+
+          $vs = & 'moonlight-qt/scripts/vswhere.exe' -latest -property installationPath
+          $vcvars = Join-Path $vs 'VC/Auxiliary/Build/vcvars64.bat'
+          cmd /c "`"$vcvars`" && dumpbin /headers `"audited\Moonlight.exe`"" | Out-File 'pe-headers.txt' -Encoding utf8
+          cmd /c "`"$vcvars`" && dumpbin /dependents `"audited\Moonlight.exe`"" | Out-File 'pe-dependents.txt' -Encoding utf8
+          if (-not (Select-String pe-headers.txt -Pattern 'machine \(x64\)' -Quiet)) { throw 'Patched executable is not x64.' }
+
+          $officialZipHash = (Get-FileHash official.zip -Algorithm SHA256).Hash
+          $patchedExeHash = (Get-FileHash audited\Moonlight.exe -Algorithm SHA256).Hash
+          $officialExeHash = (Get-FileHash official\Moonlight.exe -Algorithm SHA256).Hash
+          $qtVersion = (Get-Item audited\Qt6Core.dll).VersionInfo.FileVersion
+
+          Compress-Archive -Path audited\* -DestinationPath MoonlightPortable-x64-6.1.0-timeout-AUDITED.zip -CompressionLevel Optimal -Force
+          $auditedZipHash = (Get-FileHash MoonlightPortable-x64-6.1.0-timeout-AUDITED.zip -Algorithm SHA256).Hash
+
+          @"
+          MOONLIGHT v6.1.0 CUSTOM TIMEOUT AUDIT
+          =====================================
+          Official release URL: https://github.com/moonlight-stream/moonlight-qt/releases/download/v6.1.0/MoonlightPortable-x64-6.1.0.zip
+          Official ZIP SHA-256 expected/verified: $officialZipHash
+          Official source commit verified: f786e94c7b2f943e24e65d7d74deb539b827fc84
+          Source changes: app/backend/nvhttp.cpp only
+          FAST_FAIL_TIMEOUT_MS: 2000 -> 7000
+          REQUEST_TIMEOUT_MS: 5000 -> 10000
+          Patch line delta: exactly 2 removals + 2 additions
+          Qt runtime in audited package: $qtVersion (official package retained)
+          Package structure: 253 files / 34 folders (matches official)
+          Packaged-file byte comparison: 252/253 files identical to official
+          Only differing packaged file: Moonlight.exe
+          Official Moonlight.exe SHA-256: $officialExeHash
+          Patched Moonlight.exe SHA-256:  $patchedExeHash
+          Official Authenticode status: $($officialSig.Status)
+          Patched Authenticode status:  $($customSig.Status)
+          Patched executable version: $customVersion
+          PE architecture: x64 PASS
+          Windows loader/startup smoke test: PASS (process remained alive for 8 seconds or exited cleanly)
+          Audited ZIP SHA-256: $auditedZipHash
+
+          IMPORTANT: This validates source provenance, exact patch scope, official package equivalence,
+          Windows loading/startup, PE structure, and archive integrity. It cannot simulate the real
+          remote Sunshine host/client Internet path, so the Arkansas-to-New-Jersey connection remains
+          the final functional network test.
+          "@ | Set-Content AUDIT-REPORT.txt -Encoding utf8
+
+      - name: Upload audited package and evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: Moonlight-v6.1.0-timeout-audited
+          if-no-files-found: error
+          retention-days: 30
+          path: |
+            MoonlightPortable-x64-6.1.0-timeout-AUDITED.zip
+            AUDIT-REPORT.txt
+            timeout.patch
+            pe-headers.txt
+            pe-dependents.txt
