@@ -1,0 +1,180 @@
+name: Build custom Moonlight v6.1.0 timeout test
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-custom-moonlight.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows-x64:
+    runs-on: windows-2022
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout build harness
+        uses: actions/checkout@v4
+
+      - name: Install Qt 6.7.3 (MSVC x64)
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.7.3'
+          host: 'windows'
+          target: 'desktop'
+          arch: 'win64_msvc2019_64'
+          cache: true
+
+      - name: Ensure 7-Zip is available
+        shell: pwsh
+        run: |
+          $sevenZip = Join-Path $env:ProgramFiles '7-Zip'
+          if (-not (Test-Path (Join-Path $sevenZip '7z.exe'))) {
+            choco install 7zip -y --no-progress
+          }
+          $sevenZip | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Clone official Moonlight v6.1.0 with submodules
+        shell: pwsh
+        run: |
+          git clone --branch v6.1.0 --depth 1 --recurse-submodules https://github.com/moonlight-stream/moonlight-qt.git moonlight-qt
+          Set-Location moonlight-qt
+          git submodule update --init --recursive
+          $sha = (git rev-parse HEAD).Trim()
+          "UPSTREAM_COMMIT=$sha" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "Pinned upstream commit: $sha"
+
+      - name: Verify original timeout constants and apply only intended patch
+        shell: pwsh
+        run: |
+          Set-Location moonlight-qt
+          $path = 'app/backend/nvhttp.cpp'
+          $text = [System.IO.File]::ReadAllText($path)
+
+          $fastOld = '#define FAST_FAIL_TIMEOUT_MS 2000'
+          $requestOld = '#define REQUEST_TIMEOUT_MS 5000'
+          $fastNew = '#define FAST_FAIL_TIMEOUT_MS 7000'
+          $requestNew = '#define REQUEST_TIMEOUT_MS 10000'
+
+          if (($text.Split(@($fastOld), [System.StringSplitOptions]::None).Count - 1) -ne 1) {
+            throw "Expected exactly one original FAST_FAIL_TIMEOUT_MS definition."
+          }
+          if (($text.Split(@($requestOld), [System.StringSplitOptions]::None).Count - 1) -ne 1) {
+            throw "Expected exactly one original REQUEST_TIMEOUT_MS definition."
+          }
+
+          $text = $text.Replace($fastOld, $fastNew).Replace($requestOld, $requestNew)
+          [System.IO.File]::WriteAllText($path, $text, (New-Object System.Text.UTF8Encoding($false)))
+
+          $changed = @(git diff --name-only)
+          if ($changed.Count -ne 1 -or $changed[0].Trim() -ne $path) {
+            throw "Unexpected changed files: $($changed -join ', ')"
+          }
+
+          $patched = [System.IO.File]::ReadAllText($path)
+          if (-not $patched.Contains($fastNew)) { throw 'FAST_FAIL timeout patch missing.' }
+          if (-not $patched.Contains($requestNew)) { throw 'REQUEST timeout patch missing.' }
+          if ($patched.Contains($fastOld)) { throw 'Old FAST_FAIL timeout still present.' }
+          if ($patched.Contains($requestOld)) { throw 'Old REQUEST timeout still present.' }
+
+          git diff --check
+          git diff -- app/backend/nvhttp.cpp | Tee-Object -FilePath ../timeout.patch
+
+          $diff = (git diff --unified=0 -- app/backend/nvhttp.cpp) -join "`n"
+          if ($diff -notmatch [regex]::Escape('-#define FAST_FAIL_TIMEOUT_MS 2000')) { throw 'Expected FAST_FAIL removal not found in diff.' }
+          if ($diff -notmatch [regex]::Escape('+#define FAST_FAIL_TIMEOUT_MS 7000')) { throw 'Expected FAST_FAIL addition not found in diff.' }
+          if ($diff -notmatch [regex]::Escape('-#define REQUEST_TIMEOUT_MS 5000')) { throw 'Expected REQUEST removal not found in diff.' }
+          if ($diff -notmatch [regex]::Escape('+#define REQUEST_TIMEOUT_MS 10000')) { throw 'Expected REQUEST addition not found in diff.' }
+
+          Write-Host 'Patch verification PASS: only app/backend/nvhttp.cpp changed, with the two requested constants.'
+
+      - name: Verify build prerequisites
+        shell: cmd
+        run: |
+          where qmake
+          qmake -v
+          where 7z
+          7z | findstr /C:"7-Zip"
+          moonlight-qt\scripts\vswhere.exe -latest -property installationPath
+
+      - name: Build official-style portable release
+        shell: cmd
+        working-directory: moonlight-qt
+        run: scripts\build-arch.bat release
+
+      - name: Validate portable ZIP and executable
+        shell: pwsh
+        run: |
+          $zip = Get-ChildItem 'moonlight-qt/build/installer-x64-release/MoonlightPortable-x64-*.zip' | Select-Object -First 1
+          if (-not $zip) { throw 'Portable ZIP was not produced.' }
+          if ($zip.Length -lt 5MB) { throw "Portable ZIP is unexpectedly small: $($zip.Length) bytes" }
+
+          $smoke = Join-Path $PWD 'smoke-test'
+          if (Test-Path $smoke) { Remove-Item $smoke -Recurse -Force }
+          Expand-Archive -Path $zip.FullName -DestinationPath $smoke -Force
+
+          $exe = Join-Path $smoke 'Moonlight.exe'
+          $portable = Join-Path $smoke 'portable.dat'
+          if (-not (Test-Path $exe)) { throw 'Moonlight.exe missing from portable ZIP.' }
+          if (-not (Test-Path $portable)) { throw 'portable.dat missing from portable ZIP.' }
+
+          $hash = (Get-FileHash -Path $exe -Algorithm SHA256).Hash
+          $zipHash = (Get-FileHash -Path $zip.FullName -Algorithm SHA256).Hash
+          $version = (Get-Content 'moonlight-qt/app/version.txt' -Raw).Trim()
+          if ($version -ne '6.1.0') { throw "Unexpected Moonlight version: $version" }
+
+          $vs = & 'moonlight-qt/scripts/vswhere.exe' -latest -property installationPath
+          $vcvars = Join-Path $vs 'VC/Auxiliary/Build/vcvars64.bat'
+          cmd /c "`"$vcvars`" && dumpbin /headers `"$exe`"" | Out-File 'pe-headers.txt' -Encoding utf8
+          cmd /c "`"$vcvars`" && dumpbin /dependents `"$exe`"" | Out-File 'pe-dependents.txt' -Encoding utf8
+
+          if (-not (Select-String -Path 'pe-headers.txt' -Pattern 'machine \(x64\)' -Quiet)) {
+            throw 'PE validation did not identify an x64 executable.'
+          }
+
+          @"
+          CUSTOM MOONLIGHT BUILD VERIFICATION
+          ===================================
+          Source repository: https://github.com/moonlight-stream/moonlight-qt
+          Source tag: v6.1.0
+          Source commit: $env:UPSTREAM_COMMIT
+          Intended source changes:
+            FAST_FAIL_TIMEOUT_MS: 2000 -> 7000
+            REQUEST_TIMEOUT_MS:   5000 -> 10000
+          Changed source file: app/backend/nvhttp.cpp ONLY
+          Qt: 6.7.3 MSVC x64
+          Build method: upstream scripts/build-arch.bat release
+          Portable ZIP: $($zip.Name)
+          Portable ZIP bytes: $($zip.Length)
+          Portable ZIP SHA-256: $zipHash
+          Moonlight.exe SHA-256: $hash
+          portable.dat present: YES
+          PE architecture check: x64 PASS
+          Build/package integrity checks: PASS
+
+          NOTE: This CI verifies source pinning, exact patch scope, compilation,
+          packaging, archive integrity, and executable structure. A real
+          Arkansas-to-New-Jersey Sunshine/Moonlight session is still required
+          to validate the network behavior the longer timeouts are intended to improve.
+          "@ | Set-Content 'BUILD-VERIFICATION.txt' -Encoding utf8
+
+          Copy-Item $zip.FullName -Destination (Join-Path $PWD $zip.Name)
+          Write-Host "Portable artifact validated: $($zip.Name)"
+          Write-Host "ZIP SHA-256: $zipHash"
+          Write-Host "Moonlight.exe SHA-256: $hash"
+
+      - name: Upload portable build and verification evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: MoonlightPortable-x64-6.1.0-timeout-test
+          if-no-files-found: error
+          retention-days: 30
+          path: |
+            MoonlightPortable-x64-*.zip
+            BUILD-VERIFICATION.txt
+            timeout.patch
+            pe-headers.txt
+            pe-dependents.txt
