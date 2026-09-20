@@ -11,34 +11,37 @@ mkdir "cute-dummy-check" >nul 2>&1
 set "RESULT=%~dp0cute-dummy-check\dummy-check.txt"
 set "RAW=%~dp0cute-dummy-check\phone-contact.txt"
 
-set "BASH="
-for %%B in (
-  "C:\msys64\usr\bin\bash.exe"
-  "C:\tools\msys64\usr\bin\bash.exe"
-  "D:\msys64\usr\bin\bash.exe"
-) do if exist "%%~B" if not defined BASH set "BASH=%%~B"
+set "MSYSROOT=D:\GPTdump\!PHONESTUFF\!OSSSS\INSTALL\EDmsys"
+set "BASH=%MSYSROOT%\usr\bin\bash.exe"
 
-if not defined BASH (
-  for /f "delims=" %%B in ('where bash.exe 2^>nul') do if not defined BASH set "BASH=%%B"
-)
-
-if not defined BASH (
-  >"%RESULT%" echo silly phone contact failed - MSYS2 bash was not found
+if not exist "%BASH%" (
+  >"%RESULT%" echo silly phone contact failed - cute MSYS2 path was not found
+  >>"%RESULT%" echo Expected: %BASH%
   goto OPEN_RESULT
 )
 
+echo Found cute MSYS2:
+echo %MSYSROOT%
+echo.
 echo Contacting phone through MSYS2 UCRT64...
-"%BASH%" -lc "export PATH=/ucrt64/bin:/usr/bin:$PATH; command -v irecovery; irecovery -q" >"%RAW%" 2>&1
+
+set "CHERE_INVOKING=1"
+set "MSYSTEM=UCRT64"
+"%BASH%" -lc "export PATH=/ucrt64/bin:/usr/bin:$PATH; echo IRECOVERY=$(command -v irecovery); irecovery -q" >"%RAW%" 2>&1
 set "RC=%ERRORLEVEL%"
 
 if not "%RC%"=="0" (
   >"%RESULT%" echo silly phone contact failed - irecovery could not read a Recovery device
+  >>"%RESULT%" echo.
+  >>"%RESULT%" type "%RAW%"
   goto OPEN_RESULT
 )
 
 findstr /I /C:"MODE: Recovery" "%RAW%" >nul
 if errorlevel 1 (
   >"%RESULT%" echo silly phone contact failed - no Recovery device identity returned
+  >>"%RESULT%" echo.
+  >>"%RESULT%" type "%RAW%"
   goto OPEN_RESULT
 )
 
