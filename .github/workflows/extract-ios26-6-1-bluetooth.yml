@@ -1,0 +1,158 @@
+name: Extract iOS 26.6.1 Bluetooth Userspace
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  extract:
+    runs-on: macos-15
+    timeout-minutes: 120
+
+    env:
+      DEVICE: iPhone14,7
+      VERSION: "26.6.1"
+      BUILD: 23G83
+      EXPECTED_SHA256: FD57E3D1334335CADF43E33D051D7E873FDDF1F256298A6913C7117B068E99F0
+      PATTERN: '(?i)(bluetooth|bluetool|bluetoothd|bluetoothuserd|bluetoothaudiod|btserver|mobilebluetooth|iobluetooth|bluetoothmanager)'
+
+    steps:
+      - name: Prepare macOS runner
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sw_vers
+          uname -a
+          df -h
+
+          ROOT="$RUNNER_TEMP/iphone-research-23G83"
+          mkdir -p "$ROOT/reports" "$ROOT/download" "$ROOT/extracted"
+
+      - name: Install blacktop ipsw
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ROOT="$RUNNER_TEMP/iphone-research-23G83"
+
+          brew tap blacktop/tap
+          brew trust blacktop/tap
+          brew install --formula blacktop/tap/ipsw
+
+          ipsw version 2>&1 | tee "$ROOT/reports/ipsw-version.txt"
+
+      - name: Record exact IPSW URL
+        shell: bash
+        run: |
+          set -o pipefail
+          ROOT="$RUNNER_TEMP/iphone-research-23G83"
+
+          ipsw download ipsw \
+            --device "$DEVICE" \
+            --version "$VERSION" \
+            --build "$BUILD" \
+            --urls \
+            --no-color \
+            > "$ROOT/reports/ipsw-urls.txt" \
+            2> "$ROOT/reports/ipsw-urls.stderr.txt"
+
+      - name: Download exact 23G83 IPSW on cloud Mac
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ROOT="$RUNNER_TEMP/iphone-research-23G83"
+
+          ipsw download ipsw \
+            --device "$DEVICE" \
+            --version "$VERSION" \
+            --build "$BUILD" \
+            --output "$ROOT/download" \
+            --confirm \
+            --no-color \
+            > "$ROOT/reports/download.stdout.txt" \
+            2> "$ROOT/reports/download.stderr.txt"
+
+          IPSW="$(find "$ROOT/download" -type f -name '*.ipsw' -print -quit)"
+
+          if [ -z "$IPSW" ]; then
+            echo "No IPSW found after download." | tee "$ROOT/reports/ipsw-not-found.txt"
+            exit 1
+          fi
+
+          echo "$IPSW" > "$ROOT/reports/ipsw-path.txt"
+          stat -f '%z %N' "$IPSW" | tee "$ROOT/reports/ipsw-size.txt"
+          shasum -a 256 "$IPSW" | tee "$ROOT/reports/ipsw-sha256.txt"
+
+          CALC="$(shasum -a 256 "$IPSW" | awk '{print toupper($1)}')"
+          if [ "$CALC" != "$EXPECTED_SHA256" ]; then
+            echo "SHA256 mismatch: expected $EXPECTED_SHA256 got $CALC" | tee "$ROOT/reports/ipsw-verify-error.txt"
+            exit 1
+          fi
+
+          echo "SHA256 MATCH" | tee "$ROOT/reports/ipsw-verify-status.txt"
+          df -h | tee "$ROOT/reports/disk-after-download.txt"
+
+      - name: Extract matching Bluetooth userspace files
+        id: extract
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          ROOT="$RUNNER_TEMP/iphone-research-23G83"
+          IPSW="$(cat "$ROOT/reports/ipsw-path.txt")"
+
+          ipsw extract "$IPSW" \
+            --files \
+            --pattern "$PATTERN" \
+            --output "$ROOT/extracted" \
+            --no-color \
+            > "$ROOT/reports/extraction.stdout.txt" \
+            2> "$ROOT/reports/extraction.stderr.txt"
+
+          STATUS=$?
+          echo "$STATUS" > "$ROOT/reports/extraction-exit-code.txt"
+          exit "$STATUS"
+
+      - name: Inventory and package results
+        if: always()
+        shell: bash
+        run: |
+          set -u
+          ROOT="$RUNNER_TEMP/iphone-research-23G83"
+
+          {
+            echo "DEVICE=$DEVICE"
+            echo "VERSION=$VERSION"
+            echo "BUILD=$BUILD"
+            echo "PATTERN=$PATTERN"
+            echo
+            echo "EXTRACTED FILES"
+            echo "==============="
+            find "$ROOT/extracted" -type f -print | sort || true
+          } > "$ROOT/reports/file-list.txt"
+
+          : > "$ROOT/reports/SHA256SUMS.txt"
+          : > "$ROOT/reports/file-sizes.txt"
+
+          while IFS= read -r -d '' f; do
+            shasum -a 256 "$f" >> "$ROOT/reports/SHA256SUMS.txt" || true
+            stat -f '%z %N' "$f" >> "$ROOT/reports/file-sizes.txt" || true
+          done < <(find "$ROOT/extracted" -type f -print0 2>/dev/null)
+
+          COUNT="$(find "$ROOT/extracted" -type f | wc -l | tr -d ' ')"
+          echo "$COUNT" > "$ROOT/reports/extracted-file-count.txt"
+
+          df -h > "$ROOT/reports/final-disk-space.txt"
+
+          cd "$ROOT"
+          /usr/bin/zip -r -9 bluetooth-userspace-23G83-result.zip reports extracted >/dev/null
+
+      - name: Upload result ZIP
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-26.6.1-23G83-iPhone14_7-bluetooth-userspace
+          path: ${{ runner.temp }}/iphone-research-23G83/bluetooth-userspace-23G83-result.zip
+          if-no-files-found: error
+          retention-days: 7
