@@ -16,18 +16,21 @@ jobs:
       MODEL: D27AP
       VERSION: "26.7"
       BUILD: 23H24
+      OTA_URL: https://updates.cdn-apple.com/2026FallFCS/434fe5ee-beb3-45a3-b344-fb3fe4cc3192/com_apple_MobileAsset_SoftwareUpdate/c469d60a9a92d6417070a00f2e3cfe997a714fc3438279b892566f71b65d8154.aea
+      OTA_NAME: c469d60a9a92d6417070a00f2e3cfe997a714fc3438279b892566f71b65d8154.aea
+      OTA_SHA256: 6aae8589548e024bca4bcb732b3cd6848c57475df21a2d7b2c3e34a11b244191
       PATTERN: '(?i)(bluetooth|bluetool|bluetoothd|bluetoothuserd|bluetoothaudiod|btserver|mobilebluetooth|iobluetooth|bluetoothmanager)'
 
     steps:
-      - name: Show runner information
+      - name: Prepare macOS runner
         shell: bash
         run: |
           set -euxo pipefail
           sw_vers
           uname -a
           df -h
-          mkdir -p "$RUNNER_TEMP/iphone-research/reports"
-          mkdir -p "$RUNNER_TEMP/iphone-research/extracted"
+          ROOT="$RUNNER_TEMP/iphone-research"
+          mkdir -p "$ROOT/reports" "$ROOT/extracted" "$ROOT/keys" "$ROOT/download"
 
       - name: Install blacktop ipsw
         shell: bash
@@ -36,31 +39,82 @@ jobs:
           brew tap blacktop/tap
           brew trust blacktop/tap
           brew install --formula blacktop/tap/ipsw
-          ipsw version 2>&1 | tee "$RUNNER_TEMP/iphone-research/reports/ipsw-version.txt" ||           ipsw --version 2>&1 | tee "$RUNNER_TEMP/iphone-research/reports/ipsw-version.txt"
+          ipsw version 2>&1 | tee "$RUNNER_TEMP/iphone-research/reports/ipsw-version.txt"
 
-      - name: Record exact OTA metadata
+      - name: Download exact 26.7 OTA locally on the cloud Mac
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ROOT="$RUNNER_TEMP/iphone-research"
+          OTA="$ROOT/download/$OTA_NAME"
+
+          curl -L --fail --retry 8 --retry-delay 3 --show-error \
+            -o "$OTA" "$OTA_URL"
+
+          stat -f '%z %N' "$OTA" | tee "$ROOT/reports/ota-size.txt"
+          shasum -a 256 "$OTA" | tee "$ROOT/reports/ota-sha256.txt"
+
+          CALC="$(shasum -a 256 "$OTA" | awk '{print $1}')"
+          if [ "$CALC" != "$OTA_SHA256" ]; then
+            echo "SHA256 mismatch: expected $OTA_SHA256 got $CALC" | tee "$ROOT/reports/ota-verify-error.txt"
+            exit 1
+          fi
+
+          echo "SHA256 MATCH" | tee "$ROOT/reports/ota-verify-status.txt"
+          df -h | tee "$ROOT/reports/disk-after-download.txt"
+
+      - name: Build Apple OTA AEA key database
         shell: bash
         run: |
           set -o pipefail
-          cd "$RUNNER_TEMP/iphone-research"
-          ipsw download ota             --platform ios             --device "$DEVICE"             --model "$MODEL"             --version "$VERSION"             --build "$BUILD"             --json             > reports/ota-metadata.json 2> reports/ota-metadata.stderr.txt
-          echo $? > reports/ota-metadata-exit-code.txt
+          ROOT="$RUNNER_TEMP/iphone-research"
+          cd "$ROOT/keys"
 
-      - name: Extract Bluetooth-related files remotely on macOS
+          ipsw download ota \
+            --platform ios \
+            --device "$DEVICE" \
+            --version "$VERSION" \
+            --fcs-keys \
+            --no-color \
+            > "$ROOT/reports/keydb.stdout.txt" \
+            2> "$ROOT/reports/keydb.stderr.txt"
+
+          STATUS=$?
+          echo "$STATUS" > "$ROOT/reports/keydb-exit-code.txt"
+
+          KEYDB="$(find "$ROOT/keys" -name ota_fcs_keys.json -type f -print -quit)"
+          if [ -z "$KEYDB" ]; then
+            echo "ota_fcs_keys.json was not created" | tee "$ROOT/reports/keydb-not-found.txt"
+            exit 1
+          fi
+
+          echo "$KEYDB" > "$ROOT/reports/keydb-path.txt"
+          shasum -a 256 "$KEYDB" > "$ROOT/reports/keydb-sha256.txt"
+
+      - name: Extract Bluetooth userspace from local AEA OTA
         id: extract
         continue-on-error: true
         shell: bash
         run: |
           set -o pipefail
-          cd "$RUNNER_TEMP/iphone-research"
+          ROOT="$RUNNER_TEMP/iphone-research"
+          OTA="$ROOT/download/$OTA_NAME"
+          KEYDB="$(cat "$ROOT/reports/keydb-path.txt")"
 
-          ipsw download ota             --platform ios             --device "$DEVICE"             --model "$MODEL"             --version "$VERSION"             --build "$BUILD"             --pattern "$PATTERN"             --output "$RUNNER_TEMP/iphone-research/extracted"             --confirm             > reports/extraction.stdout.txt             2> reports/extraction.stderr.txt
+          ipsw ota extract "$OTA" \
+            --pattern "$PATTERN" \
+            --confirm \
+            --key-db "$KEYDB" \
+            --output "$ROOT/extracted" \
+            --no-color \
+            > "$ROOT/reports/extraction.stdout.txt" \
+            2> "$ROOT/reports/extraction.stderr.txt"
 
           STATUS=$?
-          echo "$STATUS" > reports/extraction-exit-code.txt
+          echo "$STATUS" > "$ROOT/reports/extraction-exit-code.txt"
           exit "$STATUS"
 
-      - name: Inventory and hash anything extracted
+      - name: Inventory and package results
         if: always()
         shell: bash
         run: |
@@ -87,6 +141,9 @@ jobs:
             stat -f '%z %N' "$f" >> "$ROOT/reports/file-sizes.txt" || true
           done < <(find "$ROOT/extracted" -type f -print0 2>/dev/null)
 
+          COUNT="$(find "$ROOT/extracted" -type f | wc -l | tr -d ' ')"
+          echo "$COUNT" > "$ROOT/reports/extracted-file-count.txt"
+
           df -h > "$ROOT/reports/final-disk-space.txt"
 
           cd "$ROOT"
@@ -96,7 +153,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ios-26.7-23H24-iPhone14_7-bluetooth-userspace
+          name: ios-26.7-23H24-iPhone14_7-bluetooth-userspace-local-ota
           path: ${{ runner.temp }}/iphone-research/bluetooth-userspace-result.zip
           if-no-files-found: error
           retention-days: 7
