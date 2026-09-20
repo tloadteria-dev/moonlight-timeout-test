@@ -5,7 +5,7 @@ Windows one-click runner combining the existing read-only Recovery query with th
 ## Run
 1. Connect only the test/dummy phone by USB.
 2. Put it in Recovery Mode.
-3. Ensure Python 3 and `irecovery.exe` are available in PATH.
+3. Ensure `python.exe` (Python 3) and `irecovery.exe` are available in PATH.
 4. Double-click `RUN_ONE_CLICK_WINDOWS.bat`.
 
 The runner executes, in order:
