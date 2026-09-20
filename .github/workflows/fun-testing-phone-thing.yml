@@ -1,8 +1,8 @@
-name: fun testing phone thing
+name: cute phone thingy test
 on:
   workflow_dispatch:
 jobs:
-  recovery-validation:
+  synthetic-passcode-recovery:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -11,13 +11,13 @@ jobs:
           python-version: "3.11"
       - name: Unit tests
         run: python -m unittest -v test_fun_testing_phone_thing.py
-      - name: Vulnerable synthetic run
-        run: python fun_testing_phone_thing.py --mode vulnerable --out vulnerable.json
-      - name: Patched synthetic run
-        run: python fun_testing_phone_thing.py --mode patched --out patched.json
+      - name: Simulated passcode removal and unlock
+        run: python fun_testing_phone_thing.py --mode vulnerable --out cute-phone-vulnerable.json
+      - name: Patched rejection control
+        run: python fun_testing_phone_thing.py --mode patched --out cute-phone-patched.json
       - uses: actions/upload-artifact@v4
         with:
-          name: fun-testing-phone-thing-results
+          name: cute-phone-thingy-test-results
           path: |
-            vulnerable.json
-            patched.json
+            cute-phone-vulnerable.json
+            cute-phone-patched.json
