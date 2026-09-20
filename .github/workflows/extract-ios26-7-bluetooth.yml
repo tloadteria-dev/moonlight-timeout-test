@@ -33,23 +33,17 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          brew install blacktop/tap/ipsw
-          ipsw version 2>&1 | tee "$RUNNER_TEMP/iphone-research/reports/ipsw-version.txt" || \
-          ipsw --version 2>&1 | tee "$RUNNER_TEMP/iphone-research/reports/ipsw-version.txt"
+          brew tap blacktop/tap
+          brew trust blacktop/tap
+          brew install --formula blacktop/tap/ipsw
+          ipsw version 2>&1 | tee "$RUNNER_TEMP/iphone-research/reports/ipsw-version.txt" ||           ipsw --version 2>&1 | tee "$RUNNER_TEMP/iphone-research/reports/ipsw-version.txt"
 
       - name: Record exact OTA metadata
         shell: bash
         run: |
           set -o pipefail
           cd "$RUNNER_TEMP/iphone-research"
-          ipsw download ota \
-            --platform ios \
-            --device "$DEVICE" \
-            --model "$MODEL" \
-            --version "$VERSION" \
-            --build "$BUILD" \
-            --json \
-            > reports/ota-metadata.json 2> reports/ota-metadata.stderr.txt
+          ipsw download ota             --platform ios             --device "$DEVICE"             --model "$MODEL"             --version "$VERSION"             --build "$BUILD"             --json             > reports/ota-metadata.json 2> reports/ota-metadata.stderr.txt
           echo $? > reports/ota-metadata-exit-code.txt
 
       - name: Extract Bluetooth-related files remotely on macOS
@@ -60,17 +54,7 @@ jobs:
           set -o pipefail
           cd "$RUNNER_TEMP/iphone-research"
 
-          ipsw download ota \
-            --platform ios \
-            --device "$DEVICE" \
-            --model "$MODEL" \
-            --version "$VERSION" \
-            --build "$BUILD" \
-            --pattern "$PATTERN" \
-            --output "$RUNNER_TEMP/iphone-research/extracted" \
-            --confirm \
-            > reports/extraction.stdout.txt \
-            2> reports/extraction.stderr.txt
+          ipsw download ota             --platform ios             --device "$DEVICE"             --model "$MODEL"             --version "$VERSION"             --build "$BUILD"             --pattern "$PATTERN"             --output "$RUNNER_TEMP/iphone-research/extracted"             --confirm             > reports/extraction.stdout.txt             2> reports/extraction.stderr.txt
 
           STATUS=$?
           echo "$STATUS" > reports/extraction-exit-code.txt
@@ -95,13 +79,9 @@ jobs:
             find "$ROOT/extracted" -type f -print | sort || true
           } > "$ROOT/reports/file-list.txt"
 
-          find "$ROOT/extracted" -type f -print0 2>/dev/null | \
-            sort -z | \
-            xargs -0 shasum -a 256 \
-            > "$ROOT/reports/SHA256SUMS.txt" 2>/dev/null || true
+          find "$ROOT/extracted" -type f -print0 2>/dev/null |             sort -z |             xargs -0 shasum -a 256             > "$ROOT/reports/SHA256SUMS.txt" 2>/dev/null || true
 
-          find "$ROOT/extracted" -type f -exec stat -f '%z %N' {} \; 2>/dev/null | \
-            sort > "$ROOT/reports/file-sizes.txt" || true
+          find "$ROOT/extracted" -type f -exec stat -f '%z %N' {} ; 2>/dev/null |             sort > "$ROOT/reports/file-sizes.txt" || true
 
           df -h > "$ROOT/reports/final-disk-space.txt"
 
