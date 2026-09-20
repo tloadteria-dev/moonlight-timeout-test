@@ -50,7 +50,6 @@ jobs:
 
           ipsw download ipsw \
             --device "$DEVICE" \
-            --version "$VERSION" \
             --build "$BUILD" \
             --urls \
             --no-color \
@@ -65,7 +64,6 @@ jobs:
 
           ipsw download ipsw \
             --device "$DEVICE" \
-            --version "$VERSION" \
             --build "$BUILD" \
             --output "$ROOT/download" \
             --confirm \
