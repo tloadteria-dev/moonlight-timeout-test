@@ -1,0 +1,25 @@
+name: Safe 23G83 Regression
+
+on:
+  push:
+    branches:
+      - safe-23g83-regression
+  workflow_dispatch:
+
+jobs:
+  simulate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Run synthetic regression
+        run: python3 safe_regression.py
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: safe-23g83-regression-results
+          path: simulation-results.json
