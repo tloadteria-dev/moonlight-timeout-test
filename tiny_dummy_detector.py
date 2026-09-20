@@ -13,7 +13,7 @@ def run(cmd):
     except Exception as e:
         return {"cmd": cmd, "error": repr(e), "stdout": "", "stderr": ""}
 
-q = run(["irecovery", "-q"])
+import os\n\nirecovery = os.environ.get("IRECOVERY_EXE", "irecovery")\nq = run([irecovery, "-q"])
 raw = (q.get("stdout", "") + "\n" + q.get("stderr", "")).lower()
 marker_terms = ["zack_dummy", "synthetic=true", "cute_dummy_marker", "lab_only=true", "simulator_only=true"]
 hits = [x for x in marker_terms if x in raw]
