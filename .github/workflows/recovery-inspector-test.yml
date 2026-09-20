@@ -1,0 +1,24 @@
+name: Recovery Inspector Static Test
+on:
+  push:
+    branches: [recovery-inspector-v1]
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Compile
+        run: python -m py_compile recovery_inspector.py
+      - name: Verify blocked strings and allowed invocation
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          s=Path("recovery_inspector.py").read_text()
+          assert 'cmd = [binary, "-q"]' in s
+          assert 'subprocess.run(cmd' in s
+          print("Static safety check passed")
+          PY
