@@ -1,0 +1,23 @@
+name: fun testing phone thing
+on:
+  workflow_dispatch:
+jobs:
+  recovery-validation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Unit tests
+        run: python -m unittest -v test_fun_testing_phone_thing.py
+      - name: Vulnerable synthetic run
+        run: python fun_testing_phone_thing.py --mode vulnerable --out vulnerable.json
+      - name: Patched synthetic run
+        run: python fun_testing_phone_thing.py --mode patched --out patched.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fun-testing-phone-thing-results
+          path: |
+            vulnerable.json
+            patched.json
